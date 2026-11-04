@@ -1,5 +1,7 @@
 # Análisis de reseñas hoteleras
 
+**Integrantes:** Bryan Velastegui y Evelyn Morocho.
+
 Aplicación en Python para ayudar al personal de un hotel a revisar comentarios de huéspedes. Permite analizar una reseña o un archivo CSV, filtrar las sugerencias por sentimiento y descargar las reseñas visibles.
 
 ## Preparar el modelo
