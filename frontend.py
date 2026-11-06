@@ -14,6 +14,7 @@ import streamlit as st
 API_URL = os.environ.get("RESENAS_API_URL", "http://127.0.0.1:8000").rstrip("/")
 MAX_CARACTERES = 10_000
 MAX_LOTE = 500
+MAX_AGRUPACION = 5_000
 ETIQUETAS = ("positiva", "negativa")
 
 
@@ -54,6 +55,30 @@ def analizar_lote(textos):
             raise ErrorAnalisis("El análisis no devolvió un resultado por reseña. Intenta nuevamente.")
         resultados.extend(sentimiento(elemento) for elemento in lote)
     return resultados
+
+
+def agrupar_quejas(negativas, indice):
+    respuesta = solicitar("/agrupar/negativas", {"resenas": [
+        {"numero": numero, "texto": fila[indice].strip()} for numero, fila in negativas
+    ]})
+    grupos = respuesta.get("grupos") if isinstance(respuesta, dict) else None
+    valido = isinstance(grupos, list) and respuesta.get("total") == len(negativas)
+    numeros, identificadores = [], []
+    if valido:
+        for grupo in grupos:
+            if (not isinstance(grupo, dict) or type(grupo.get("id")) is not int
+                    or not isinstance(grupo.get("tema"), str) or not grupo["tema"].strip()
+                    or not isinstance(grupo.get("resenas"), list)
+                    or not grupo["resenas"] or grupo.get("cantidad") != len(grupo["resenas"])
+                    or any(type(numero) is not int for numero in grupo["resenas"])):
+                valido = False
+                break
+            identificadores.append(grupo["id"])
+            numeros.extend(grupo["resenas"])
+    if (not valido or len(set(identificadores)) != len(identificadores)
+            or sorted(numeros) != sorted(numero for numero, _ in negativas)):
+        raise ErrorAnalisis("La agrupación no devolvió todas las quejas. Intenta nuevamente.")
+    return grupos
 
 
 def leer_csv(datos):
@@ -103,6 +128,13 @@ def exportar_csv(columnas, filas):
     return salida.getvalue().encode("utf-8-sig")
 
 
+def nombre_disponible(nombre, columnas):
+    nombres = {columna.casefold() for columna in columnas}
+    while nombre.casefold() in nombres:
+        nombre += "_analizado"
+    return nombre
+
+
 def mostrar_etiqueta(etiqueta):
     mensaje = f"Clasificación sugerida: {etiqueta}"
     if etiqueta == "negativa":
@@ -139,6 +171,7 @@ def cargar_archivo():
     )
     if archivo is None:
         st.session_state.pop("resultado_csv", None)
+        st.session_state.pop("temas_csv", None)
         return
     datos = archivo.getvalue()
     try:
@@ -156,6 +189,7 @@ def cargar_archivo():
     clave = (huella, columna)
     if st.button("Analizar archivo", type="primary", icon=":material/arrow_forward:", key=f"analizar_csv_{huella}"):
         st.session_state.pop("resultado_csv", None)
+        st.session_state.pop("temas_csv", None)
         st.session_state.pop("filtro_csv", None)
         textos = [fila[indice].strip() for fila in filas]
         invalidas = [str(i) for i, texto in enumerate(textos, start=1) if not 1 <= len(texto) <= MAX_CARACTERES]
@@ -171,10 +205,68 @@ def cargar_archivo():
 
     resultado = st.session_state.get("resultado_csv")
     if resultado is not None and resultado[0] == clave:
-        mostrar_resultados(columnas, filas, indice, resultado[1])
+        mostrar_resultados(columnas, filas, indice, resultado[1], clave)
 
 
-def mostrar_resultados(columnas, filas, indice, etiquetas):
+def mostrar_temas(columnas, filas, indice, etiquetas, clave):
+    st.subheader("Problemas que se repiten")
+    negativas = [(numero, fila) for numero, (fila, etiqueta) in
+                 enumerate(zip(filas, etiquetas, strict=True), 1) if etiqueta == "negativa"]
+    if not negativas:
+        st.info("No se identificaron reseñas negativas en este archivo.")
+        return
+    st.write(f"Hay {len(negativas)} reseñas clasificadas como negativas para revisar.")
+    st.caption("Agrupa comentarios parecidos para identificar asuntos recurrentes y decidir qué revisar primero.")
+    if len(negativas) > MAX_AGRUPACION:
+        st.info("Para agrupar las quejas, carga un archivo con hasta 5.000 reseñas negativas.")
+        return
+    if st.button("Agrupar reseñas negativas", icon=":material/category:"):
+        st.session_state.pop("temas_csv", None)
+        try:
+            with st.spinner("Buscando comentarios parecidos…"):
+                st.session_state["temas_csv"] = clave, agrupar_quejas(negativas, indice)
+        except ErrorAnalisis as error:
+            st.error(str(error))
+    resultado = st.session_state.get("temas_csv")
+    if resultado is None or resultado[0] != clave:
+        return
+    grupos = resultado[1]
+    st.caption("Grupos sugeridos, ordenados por cantidad de reseñas. Revisa los textos: un comentario puede tratar varios asuntos.")
+    resumen = pd.DataFrame([
+        {"Grupo": grupo["id"], "Palabras del grupo": grupo["tema"], "Reseñas": grupo["cantidad"]}
+        for grupo in grupos
+    ])
+    st.dataframe(resumen, hide_index=True, width="stretch")
+    opciones = {0: "Todos los grupos", **{
+        grupo["id"]: f"{grupo['id']}. {grupo['tema']} ({grupo['cantidad']} reseñas)" for grupo in grupos
+    }}
+    elegido = st.selectbox("Grupo de quejas a revisar", list(opciones), format_func=opciones.get,
+                          key=f"grupo_quejas_{clave[0]}_{indice}")
+    por_numero = {numero: grupo for grupo in grupos for numero in grupo["resenas"]}
+    visibles = [(numero, fila, por_numero[numero]) for numero, fila in negativas
+                if elegido == 0 or por_numero[numero]["id"] == elegido]
+    st.dataframe(pd.DataFrame([
+        {"Reseña": numero, "Grupo": grupo["id"], "Palabras del grupo": grupo["tema"], "Texto": fila[indice]}
+        for numero, fila, grupo in visibles
+    ]), hide_index=True, width="stretch", column_config={"Texto": st.column_config.TextColumn(width="large")})
+    with st.expander("Leer una queja completa"):
+        por_fila = {numero: fila for numero, fila, _ in visibles}
+        seleccion = st.selectbox("Número de queja", list(por_fila),
+                                key=f"queja_{clave[0]}_{indice}_{elegido}")
+        st.text(por_fila[seleccion][indice])
+    cabecera = list(columnas)
+    for nombre in ("sentimiento", "grupo_queja", "tema_queja"):
+        cabecera.append(nombre_disponible(nombre, cabecera))
+    st.download_button(
+        "Descargar quejas agrupadas", data=exportar_csv(cabecera, (
+            [*fila, "negativa", str(grupo["id"]), grupo["tema"]] for _, fila, grupo in visibles
+        )), file_name="quejas_agrupadas.csv", mime="text/csv", icon=":material/download:", on_click="ignore",
+    )
+
+
+def mostrar_resultados(columnas, filas, indice, etiquetas, clave):
+    st.divider()
+    mostrar_temas(columnas, filas, indice, etiquetas, clave)
     st.divider()
     st.subheader("Resultados")
     filtros = {"Todas": None, "Negativas": "negativa", "Positivas": "positiva"}
@@ -200,10 +292,7 @@ def mostrar_resultados(columnas, filas, indice, etiquetas):
         mostrar_etiqueta(etiqueta)
         st.text(fila[indice])
 
-    nombres = {nombre.casefold() for nombre in columnas}
-    nueva_columna = "sentimiento"
-    while nueva_columna.casefold() in nombres:
-        nueva_columna += "_analizado"
+    nueva_columna = nombre_disponible("sentimiento", columnas)
     accion = "Descargar todas las reseñas" if opcion == "Todas" else f"Descargar reseñas {opcion.lower()}"
     st.download_button(
         accion, data=exportar_csv(
