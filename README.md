@@ -54,3 +54,7 @@ La agrupación admite hasta 5.000 reseñas negativas por archivo y diez millones
 Los grupos se calculan sobre el archivo recibido mediante TF-IDF y K-means; cada comentario se asigna a uno y los tres términos con mayor peso medio sirven como nombre. La cantidad es exploratoria, hasta cinco grupos con vocabulario y un posible grupo sin términos. Los identificadores solo tienen sentido dentro de ese archivo. La frecuencia ayuda a decidir qué revisar primero, pero no establece la gravedad ni garantiza que todos los comentarios compartan el mismo problema. Conviene leer las reseñas antes de actuar; una reseña puede hablar de varios asuntos y la clasificación inicial puede equivocarse.
 
 La sección 9 del cuaderno reproduce la misma función del backend sobre las negativas de entrenamiento y guarda un gráfico en `resultados/figuras_modelo/05_grupos_de_quejas.png`. El registro `resultados/agrupacion_exploratoria.json` conserva la correspondencia con los identificadores del corpus. Esta exploración no utiliza la prueba reservada ni cambia el clasificador de sentimiento. Referencia: [agrupación de documentos con K-means](https://scikit-learn.org/stable/auto_examples/text/plot_document_clustering.html).
+
+## Informe
+
+El [informe final en PDF](entregables/informe.pdf) documenta los datos, la metodología, los resultados y el uso de la aplicación.
