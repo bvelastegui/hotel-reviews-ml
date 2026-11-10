@@ -1,6 +1,6 @@
 # Análisis de reseñas hoteleras
 
-**Integrantes:** Bryan Velastegui y Evelyn Morocho.
+**Integrantes:** Bryan Velastegui, Evelyn Morocho y Erika Gudiño.
 
 Aplicación en Python para ayudar al personal de un hotel a revisar comentarios de huéspedes. Permite analizar una reseña o un archivo CSV, filtrar las sugerencias por sentimiento, agrupar quejas parecidas y descargar las reseñas visibles para apoyar decisiones.
 
@@ -59,8 +59,8 @@ La sección 9 del cuaderno reproduce la misma función del backend sobre las neg
 
 El [informe final en PDF](entregables/informe.pdf) documenta los datos, la metodología, los resultados y el uso de la aplicación.
 
-## Material de defensa
+## Presentación y póster
 
-La [presentación de defensa](entregables/presentacion.pptx) incluye 14 diapositivas principales y dos de respaldo, con notas del expositor. También se incluye una [copia PDF](entregables/presentacion.pdf).
+La [presentación](entregables/presentacion.pptx) incluye 14 diapositivas principales y dos de respaldo, con notas del expositor. También se incluye una [copia PDF](entregables/presentacion.pdf).
 
-El [póster en PDF](entregables/poster.pdf) se entrega en formato A3 horizontal (420 × 297 mm).
+El [póster en PDF](entregables/poster.pdf) tiene formato A3 horizontal (420 × 297 mm).
