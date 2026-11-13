@@ -6,6 +6,7 @@ kaggle==2.2.5
 matplotlib==3.11.2
 numpy==2.5.4
 pandas==3.0.6
+papermill==2.7.0
 pydantic==2.14.3
 requests==2.34.2
 scikit-learn==1.9.1
