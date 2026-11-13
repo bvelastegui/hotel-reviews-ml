@@ -1,10 +1,24 @@
+[server]
+enableStaticServing = true
+
 [theme]
 base = "light"
 primaryColor = "#096B59"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#EFF5F2"
-textColor = "#16332C"
-font = "sans-serif"
+backgroundColor = "#F7F5EF"
+secondaryBackgroundColor = "#E7EDE7"
+textColor = "#173F3B"
+borderColor = "#CFD9D1"
+baseRadius = "10px"
+font = "Inter"
+headingFont = "Inter"
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+headingFontSizes = ["2.4rem", "1.6rem", "1.25rem", "1rem", "0.9rem", "0.8rem"]
+chartCategoricalColors = ["#096B59", "#BB633D", "#173F3B", "#7FA99B", "#D9A441"]
+
+[[theme.fontFaces]]
+family = "Inter"
+url = "app/static/fuentes/inter-latin-wght-normal.woff2"
+weight = "100 900"
 
 [client]
 toolbarMode = "minimal"

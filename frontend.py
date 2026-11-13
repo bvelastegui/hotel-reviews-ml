@@ -3,19 +3,23 @@
 import csv
 import io
 import os
+import unicodedata
 from hashlib import sha256
 from itertools import batched
+from pathlib import Path
 
 import pandas as pd
 import requests
 import streamlit as st
 
 
+MARCA = Path(__file__).resolve().parent / "static" / "marca.svg"
 API_URL = os.environ.get("RESENAS_API_URL", "http://127.0.0.1:8000").rstrip("/")
 MAX_CARACTERES = 10_000
 MAX_LOTE = 500
 MAX_AGRUPACION = 5_000
 ETIQUETAS = ("positiva", "negativa")
+PLANTILLA = "id,texto\nR-001,La habitación estaba limpia y el personal fue muy amable.\nR-002,El aire acondicionado no funcionaba y nadie vino a revisarlo.\n"
 
 
 class ErrorAnalisis(Exception):
@@ -135,6 +139,42 @@ def nombre_disponible(nombre, columnas):
     return nombre
 
 
+def miles(numero):
+    return f"{numero:,}".replace(",", ".")
+
+
+def cantidad(numero, singular, plural):
+    return f"{miles(numero)} {singular if numero == 1 else plural}"
+
+
+def plegar(texto):
+    """Minúsculas y sin tildes, para buscar «limpieza» aunque se escriba «LIMPIEZA» o «limpíeza»."""
+    return "".join(c for c in unicodedata.normalize("NFD", texto.casefold()) if unicodedata.category(c) != "Mn")
+
+
+def columnas_de_contexto(columnas, filas, indice, maximo=2):
+    """Columnas breves del archivo (identificador, fecha, tema…) que ayudan a ubicar cada reseña."""
+    elegidas = []
+    for posicion, nombre in enumerate(columnas):
+        if posicion == indice:
+            continue
+        valores = [fila[posicion] for fila in filas[:200]]
+        if valores and max(len(valor) for valor in valores) <= 40:
+            elegidas.append(posicion)
+        if len(elegidas) == maximo:
+            break
+    return elegidas
+
+
+def resaltar_negativas(valor):
+    return "background-color: #FBEBD3; color: #6A3B12" if valor == "Negativa" else ""
+
+
+def fila_seleccionada(evento):
+    filas = evento.selection.rows if evento is not None else []
+    return filas[0] if filas else None
+
+
 def mostrar_etiqueta(etiqueta):
     mensaje = f"Clasificación sugerida: {etiqueta}"
     if etiqueta == "negativa":
@@ -144,10 +184,12 @@ def mostrar_etiqueta(etiqueta):
 
 
 def reseña_individual():
+    st.markdown("**Revisar una reseña**")
+    st.caption("Para un comentario suelto, como uno recibido por correo o en recepción.")
     with st.form("analizar_individual", border=False):
         texto = st.text_area(
-            "Texto de la reseña", height=185, max_chars=MAX_CARACTERES,
-            placeholder="Escribe o pega el comentario del huésped…",
+            "Texto de la reseña", height=150, max_chars=MAX_CARACTERES,
+            placeholder="Escribe o pega el comentario del huésped…", label_visibility="collapsed",
         )
         enviado = st.form_submit_button("Analizar reseña", type="primary", icon=":material/arrow_forward:")
     if enviado:
@@ -172,6 +214,23 @@ def cargar_archivo():
     if archivo is None:
         st.session_state.pop("resultado_csv", None)
         st.session_state.pop("temas_csv", None)
+        pasos = [
+            (":material/upload_file:", "Carga el archivo",
+             "Un CSV con una fila de encabezados y una columna con el texto de cada reseña."),
+            (":material/flag:", "Revisa lo urgente",
+             "Cada reseña recibe una clasificación sugerida; filtra las negativas o busca una palabra."),
+            (":material/category:", "Agrupa lo repetido",
+             "Agrupa las quejas parecidas, léelas completas y descarga la selección."),
+        ]
+        for columna, (icono, titulo, texto) in zip(st.columns(3, gap="medium"), pasos, strict=True):
+            with columna:
+                st.markdown(f"{icono} **{titulo}**")
+                st.caption(texto)
+        st.caption("Las demás columnas del archivo, como un identificador o la fecha, se conservan en los resultados "
+                   "y en la descarga. ¿Necesitas un ejemplo del formato?")
+        st.download_button("Descargar plantilla", data=("\ufeff" + PLANTILLA).encode("utf-8"),
+                           file_name="plantilla_resenas.csv", mime="text/csv", icon=":material/description:",
+                           on_click="ignore")
         return
     datos = archivo.getvalue()
     try:
@@ -213,101 +272,139 @@ def mostrar_temas(columnas, filas, indice, etiquetas, clave):
     negativas = [(numero, fila) for numero, (fila, etiqueta) in
                  enumerate(zip(filas, etiquetas, strict=True), 1) if etiqueta == "negativa"]
     if not negativas:
-        st.info("No se identificaron reseñas negativas en este archivo.")
+        st.info("Ninguna reseña del archivo se clasificó como negativa.", icon=":material/check_circle:")
         return
-    st.write(f"Hay {len(negativas)} reseñas clasificadas como negativas para revisar.")
-    st.caption("Agrupa comentarios parecidos para identificar asuntos recurrentes y decidir qué revisar primero.")
     if len(negativas) > MAX_AGRUPACION:
         st.info("Para agrupar las quejas, carga un archivo con hasta 5.000 reseñas negativas.")
         return
-    if st.button("Agrupar reseñas negativas", icon=":material/category:"):
-        st.session_state.pop("temas_csv", None)
-        try:
-            with st.spinner("Buscando comentarios parecidos…"):
-                st.session_state["temas_csv"] = clave, agrupar_quejas(negativas, indice)
-        except ErrorAnalisis as error:
-            st.error(str(error))
     resultado = st.session_state.get("temas_csv")
     if resultado is None or resultado[0] != clave:
+        st.caption(f"Reúne {cantidad(len(negativas), 'la reseña negativa', 'las reseñas negativas')} en grupos de comentarios parecidos "
+                   "para ver qué asuntos se repiten y decidir qué revisar primero.")
+        if st.button("Agrupar reseñas negativas", icon=":material/category:", key=f"agrupar_{clave[0]}"):
+            try:
+                with st.spinner("Buscando comentarios parecidos…"):
+                    st.session_state["temas_csv"] = clave, agrupar_quejas(negativas, indice)
+            except ErrorAnalisis as error:
+                st.error(str(error))
+            else:
+                st.rerun()
         return
+
     grupos = resultado[1]
-    st.caption("Grupos sugeridos, ordenados por cantidad de reseñas. Revisa los textos: un comentario puede tratar varios asuntos.")
-    resumen = pd.DataFrame([
-        {"Grupo": grupo["id"], "Palabras del grupo": grupo["tema"], "Reseñas": grupo["cantidad"]}
-        for grupo in grupos
-    ])
-    st.dataframe(resumen, hide_index=True, width="stretch")
-    opciones = {0: "Todos los grupos", **{
-        grupo["id"]: f"{grupo['id']}. {grupo['tema']} ({grupo['cantidad']} reseñas)" for grupo in grupos
-    }}
-    elegido = st.selectbox("Grupo de quejas a revisar", list(opciones), format_func=opciones.get,
-                          key=f"grupo_quejas_{clave[0]}_{indice}")
+    contexto = columnas_de_contexto(columnas, filas, indice)
+    opciones = {grupo["id"]: grupo for grupo in grupos}
+    elegido = st.pills(
+        "Grupos de quejas, de más a menos frecuente", list(opciones),
+        format_func=lambda i: f"{opciones[i]['tema']} · {opciones[i]['cantidad']}",
+        key=f"grupo_quejas_{clave[0]}_{indice}",
+        help="Selecciona un grupo para ver solo sus quejas. Vuelve a pulsarlo para ver todas.",
+    )
+    st.caption("Los grupos reúnen comentarios con palabras parecidas. Lee los textos antes de decidir: "
+               "una queja puede tratar varios asuntos y la cantidad no indica gravedad.")
     por_numero = {numero: grupo for grupo in grupos for numero in grupo["resenas"]}
     visibles = [(numero, fila, por_numero[numero]) for numero, fila in negativas
-                if elegido == 0 or por_numero[numero]["id"] == elegido]
-    st.dataframe(pd.DataFrame([
-        {"Reseña": numero, "Grupo": grupo["id"], "Palabras del grupo": grupo["tema"], "Texto": fila[indice]}
+                if elegido is None or por_numero[numero]["id"] == elegido]
+    tabla = pd.DataFrame([
+        {"Reseña": numero, **{columnas[i]: fila[i] for i in contexto},
+         "Grupo": grupo["tema"], "Texto": fila[indice]}
         for numero, fila, grupo in visibles
-    ]), hide_index=True, width="stretch", column_config={"Texto": st.column_config.TextColumn(width="large")})
-    with st.expander("Leer una queja completa"):
-        por_fila = {numero: fila for numero, fila, _ in visibles}
-        seleccion = st.selectbox("Número de queja", list(por_fila),
-                                key=f"queja_{clave[0]}_{indice}_{elegido}")
-        st.text(por_fila[seleccion][indice])
+    ])
+    evento = st.dataframe(
+        tabla, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
+        key=f"quejas_{clave[0]}_{indice}_{elegido}",
+        column_config={"Texto": st.column_config.TextColumn(width="large")},
+        alt="Quejas del grupo seleccionado",
+    )
+    seleccion = fila_seleccionada(evento)
+    if seleccion is None:
+        st.caption("Selecciona una fila para leer la queja completa.")
+    else:
+        numero, fila, grupo = visibles[seleccion]
+        with st.container(border=True):
+            st.markdown(f"**Queja {numero}** · {grupo['tema']}")
+            st.text(fila[indice])
     cabecera = list(columnas)
     for nombre in ("sentimiento", "grupo_queja", "tema_queja"):
         cabecera.append(nombre_disponible(nombre, cabecera))
     st.download_button(
-        "Descargar quejas agrupadas", data=exportar_csv(cabecera, (
+        f"Descargar {cantidad(len(visibles), 'queja', 'quejas')}", data=exportar_csv(cabecera, (
             [*fila, "negativa", str(grupo["id"]), grupo["tema"]] for _, fila, grupo in visibles
         )), file_name="quejas_agrupadas.csv", mime="text/csv", icon=":material/download:", on_click="ignore",
+        key=f"descargar_quejas_{clave[0]}_{elegido}",
     )
 
 
 def mostrar_resultados(columnas, filas, indice, etiquetas, clave):
     st.divider()
-    mostrar_temas(columnas, filas, indice, etiquetas, clave)
-    st.divider()
     st.subheader("Resultados")
+    total = len(etiquetas)
+    negativas = etiquetas.count("negativa")
+    st.markdown(f"**{miles(negativas)} de {miles(total)} reseñas** se clasificaron como negativas "
+                f"({round(100 * negativas / total)} %) y conviene revisarlas.")
+
+    conteos = {"Todas": total, "Negativas": negativas, "Positivas": total - negativas}
     filtros = {"Todas": None, "Negativas": "negativa", "Positivas": "positiva"}
-    opcion = st.radio("Filtrar por clasificación", list(filtros), horizontal=True, key="filtro_csv")
+    with st.container(horizontal=True, vertical_alignment="bottom"):
+        opcion = st.segmented_control(
+            "Mostrar", list(filtros), default="Todas", required=True, key=f"filtro_csv_{clave[0]}",
+            format_func=lambda nombre: f"{nombre} · {miles(conteos[nombre])}",
+        )
+        busqueda = st.text_input(
+            "Buscar en el texto", placeholder="Por ejemplo: wifi, ruido, desayuno",
+            key=f"buscar_{clave[0]}", width=320,
+        )
+    termino = plegar(busqueda.strip())
     visibles = [
         (numero, fila, etiqueta) for numero, (fila, etiqueta) in enumerate(zip(filas, etiquetas, strict=True), 1)
-        if filtros[opcion] is None or filtros[opcion] == etiqueta
+        if (filtros[opcion] is None or filtros[opcion] == etiqueta)
+        and (not termino or termino in plegar(fila[indice]))
     ]
     if not visibles:
-        st.info("No hay reseñas para este filtro.")
-        return
+        st.info("Ninguna reseña coincide con el filtro y la búsqueda. Prueba con otra palabra o muestra todas.",
+                icon=":material/search_off:")
+    else:
+        contexto = columnas_de_contexto(columnas, filas, indice)
+        tabla = pd.DataFrame([
+            {"Reseña": numero, **{columnas[i]: fila[i] for i in contexto},
+             "Clasificación": etiqueta.capitalize(), "Texto": fila[indice]}
+            for numero, fila, etiqueta in visibles
+        ])
+        evento = st.dataframe(
+            tabla.style.map(resaltar_negativas, subset=["Clasificación"]), width="stretch", hide_index=True,
+            on_select="rerun", selection_mode="single-row", key=f"tabla_{clave[0]}_{opcion}_{termino}",
+            column_config={"Texto": st.column_config.TextColumn(width="large")},
+            alt="Reseñas analizadas con su clasificación sugerida",
+        )
+        seleccion = fila_seleccionada(evento)
+        if seleccion is None:
+            st.caption("Selecciona una fila para leer la reseña completa.")
+        else:
+            numero, fila, etiqueta = visibles[seleccion]
+            with st.container(border=True):
+                datos = " · ".join(f"{columnas[i]}: {fila[i]}" for i in contexto)
+                st.markdown(f"**Reseña {numero}**" + (f" · {datos}" if datos else ""))
+                mostrar_etiqueta(etiqueta)
+                st.text(fila[indice])
 
-    tabla = pd.DataFrame(
-        [(numero, etiqueta.capitalize(), fila[indice]) for numero, fila, etiqueta in visibles],
-        columns=["Reseña", "Clasificación", "Texto"],
-    )
-    st.dataframe(tabla, width="stretch", hide_index=True,
-                 column_config={"Texto": st.column_config.TextColumn(width="large")})
-    with st.expander("Leer una reseña completa"):
-        detalles = {numero: (fila, etiqueta) for numero, fila, etiqueta in visibles}
-        elegida = st.selectbox("Número de reseña", list(detalles), key=f"detalle_csv_{opcion}")
-        fila, etiqueta = detalles[elegida]
-        mostrar_etiqueta(etiqueta)
-        st.text(fila[indice])
-
-    nueva_columna = nombre_disponible("sentimiento", columnas)
-    accion = "Descargar todas las reseñas" if opcion == "Todas" else f"Descargar reseñas {opcion.lower()}"
-    st.download_button(
-        accion, data=exportar_csv(
-            [*columnas, nueva_columna], ([*fila, etiqueta] for _, fila, etiqueta in visibles)
-        ),
-        file_name=f"resenas_{opcion.lower()}.csv", mime="text/csv", icon=":material/download:",
-        key=f"descargar_csv_{opcion}", on_click="ignore",
-    )
+        nueva_columna = nombre_disponible("sentimiento", columnas)
+        st.download_button(
+            f"Descargar {cantidad(len(visibles), 'reseña', 'reseñas')}", data=exportar_csv(
+                [*columnas, nueva_columna], ([*fila, etiqueta] for _, fila, etiqueta in visibles)
+            ),
+            file_name=f"resenas_{opcion.lower()}.csv", mime="text/csv", icon=":material/download:",
+            key=f"descargar_csv_{clave[0]}_{opcion}_{termino}", on_click="ignore",
+        )
+    st.divider()
+    mostrar_temas(columnas, filas, indice, etiquetas, clave)
 
 
-st.set_page_config(page_title="Reseñas del hotel", page_icon=":material/rate_review:", layout="centered")
-st.title("Reseñas del hotel")
-st.caption("Revisa comentarios de huéspedes y encuentra los que requieren atención.")
-individual, archivo_csv = st.tabs(["Una reseña", "Archivo CSV"])
-with individual:
-    reseña_individual()
-with archivo_csv:
-    cargar_archivo()
+st.set_page_config(page_title="Reseñas del hotel", page_icon=str(MARCA), layout="centered")
+with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+    with st.container(horizontal=True, vertical_alignment="center", gap="small", width="content"):
+        st.image(str(MARCA), width=48, alt="")
+        st.title("Reseñas del hotel")
+    with st.popover("Revisar una reseña", icon=":material/edit_note:"):
+        reseña_individual()
+st.markdown("Carga las reseñas de tus huéspedes y encuentra las quejas que necesitan atención.")
+cargar_archivo()
