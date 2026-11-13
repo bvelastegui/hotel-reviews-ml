@@ -1,8 +1,14 @@
-"""API local de clasificación de reseñas hoteleras."""
+"""API local de clasificación de reseñas hoteleras.
+
+Las operaciones de uso (`/predecir`, `/agrupar`) atienden a la interfaz del administrador.
+Las operaciones de `/modelo` describen, activan o restauran pipelines que produce el cuaderno
+`modelo_resenas.ipynb`; la API no entrena modelos.
+"""
 
 import hashlib
 import json
 import math
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,7 +16,7 @@ from typing import Annotated, Literal
 
 import joblib
 import numpy as np
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -19,7 +25,12 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.pipeline import Pipeline
 
 
-RESULTADOS = Path(__file__).resolve().parent / "resultados" / "modelo"
+RAIZ_RESULTADOS = Path(__file__).resolve().parent / "resultados"
+RESULTADOS = RAIZ_RESULTADOS / "modelo"  # Modelo de referencia evaluado en el cuaderno.
+# Cada ejecución del cuaderno lanzada desde la herramienta escribe en resultados/modelos/<id>/.
+MODELOS_ENTRENADOS = RAIZ_RESULTADOS / "modelos"
+MODELO_ACTIVO = RAIZ_RESULTADOS / "modelo_activo.json"
+IDENTIFICADOR = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_CARACTERES = 10_000
 MAX_RESENAS = 500
 MAX_AGRUPACION = 5_000
@@ -143,10 +154,33 @@ def agrupar_negativas(lote: LoteNegativas) -> AgrupacionNegativas:
     return AgrupacionNegativas(total=len(resenas), grupos=grupos)
 
 
-def cargar_pipeline() -> Pipeline:
-    ruta = RESULTADOS / "sentimiento.joblib"
+def carpeta_ejecucion(identificador: str) -> Path:
+    """Carpeta del pipeline exportado por una ejecución del cuaderno."""
+    if not IDENTIFICADOR.match(identificador):
+        raise ValueError("Identificador de ejecución no válido.")
+    return MODELOS_ENTRENADOS / identificador / "modelo"
+
+
+def carpeta_activa() -> Path:
+    """Carpeta del modelo que sirve la API; sin selección, el modelo de referencia."""
     try:
-        evidencia = json.loads((RESULTADOS / "metricas.json").read_text(encoding="utf-8"))
+        seleccion = json.loads(MODELO_ACTIVO.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return RESULTADOS
+    try:
+        carpeta = carpeta_ejecucion(str(seleccion.get("id", "")))
+    except ValueError as error:
+        raise RuntimeError("modelo_activo.json no es válido. Restaura el modelo de referencia.") from error
+    if not carpeta.is_dir():
+        raise RuntimeError("modelo_activo.json apunta a un modelo inexistente. Restaura el modelo de referencia.")
+    return carpeta
+
+
+def cargar_pipeline(carpeta: Path | None = None) -> tuple[Pipeline, dict]:
+    carpeta = carpeta or carpeta_activa()
+    ruta = carpeta / "sentimiento.joblib"
+    try:
+        evidencia = json.loads((carpeta / "metricas.json").read_text(encoding="utf-8"))
         with ruta.open("rb") as archivo:
             if hashlib.file_digest(archivo, "sha256").hexdigest() != evidencia["pipeline"]["sha256"]:
                 raise RuntimeError("La huella del pipeline difiere del registro de entrenamiento.")
@@ -156,16 +190,18 @@ def cargar_pipeline() -> Pipeline:
         raise RuntimeError("Faltan las evidencias del modelo. Ejecuta modelo_resenas.ipynb.") from error
     if not isinstance(pipeline, Pipeline) or list(getattr(pipeline, "classes_", [])) != [0, 1]:
         raise RuntimeError("El pipeline debe estar entrenado con las clases binarias 0 y 1.")
-    return pipeline
+    return pipeline, evidencia
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.pipeline = cargar_pipeline()
+    carpeta = carpeta_activa()
+    app.state.pipeline, app.state.evidencia = cargar_pipeline(carpeta)
+    app.state.id_activo = None if carpeta == RESULTADOS else carpeta.parent.name
     yield
 
 
-app = FastAPI(title="Análisis de reseñas hoteleras", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Análisis de reseñas hoteleras", version="1.2.0", lifespan=lifespan)
 
 
 @app.exception_handler(RequestValidationError)
@@ -200,3 +236,98 @@ def predecir_lote(lote: Lote, request: Request) -> Clasificaciones:
 def temas_negativas(lote: LoteNegativas) -> AgrupacionNegativas:
     """Recibe reseñas ya clasificadas como negativas, con su número de fila original."""
     return agrupar_negativas(lote)
+
+
+# ---------------------------------------------------------------------------
+# Modelos producidos por el cuaderno: descripción, activación y restauración
+# ---------------------------------------------------------------------------
+
+class MetricasClase(BaseModel):
+    precision: float
+    recall: float
+    f1: float
+    soporte: int
+
+
+class Metricas(BaseModel):
+    f1_macro: float
+    exactitud: float
+    negativa: MetricasClase
+    positiva: MetricasClase
+    matriz_confusion: list[list[int]]
+
+
+class DescripcionModelo(BaseModel):
+    algoritmo: str
+    nombre: str
+    parametros: dict
+    tfidf: dict
+    umbral: float | None
+
+
+class ModeloServido(BaseModel):
+    origen: Literal["referencia", "herramienta"]
+    id: str | None
+    modelo: DescripcionModelo | None
+    validacion: Metricas | None
+    prueba: Metricas | None
+
+
+class Activacion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{1,64}$")]
+
+
+def convertir_metricas(datos: dict | None) -> Metricas | None:
+    if not datos:
+        return None
+    clase = lambda d: MetricasClase(precision=d["precision"], recall=d["recall"],  # noqa: E731
+                                    f1=d["f1-score"], soporte=int(d["support"]))
+    return Metricas(f1_macro=datos["f1_macro"], exactitud=datos["exactitud"],
+                    negativa=clase(datos["negativa"]), positiva=clase(datos["positiva"]),
+                    matriz_confusion=datos["matriz_confusion"])
+
+
+def describir_servido(app_state) -> ModeloServido:
+    evidencia = app_state.evidencia
+    descripcion = evidencia.get("modelo")
+    return ModeloServido(
+        origen="herramienta" if app_state.id_activo else "referencia", id=app_state.id_activo,
+        modelo=DescripcionModelo(**descripcion) if descripcion else None,
+        validacion=convertir_metricas(evidencia.get("evaluacion_validacion")),
+        prueba=convertir_metricas(evidencia.get("evaluacion_prueba")),
+    )
+
+
+@app.get("/modelo")
+def modelo_servido(request: Request) -> ModeloServido:
+    """Describe el modelo que responde a la interfaz y las métricas que registró el cuaderno."""
+    return describir_servido(request.app.state)
+
+
+@app.post("/modelo/activar")
+def activar(activacion: Activacion, request: Request) -> ModeloServido:
+    """Pone en uso el pipeline de una ejecución del cuaderno, tras verificar su huella."""
+    carpeta = carpeta_ejecucion(activacion.id)
+    if not carpeta.is_dir():
+        raise HTTPException(status_code=404, detail="No existe esa ejecución del cuaderno.")
+    try:
+        pipeline, evidencia = cargar_pipeline(carpeta)
+    except RuntimeError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    temporal = MODELO_ACTIVO.with_suffix(".tmp")
+    temporal.write_text(json.dumps({"id": activacion.id}) + "\n", encoding="utf-8")
+    temporal.replace(MODELO_ACTIVO)
+    estado = request.app.state
+    estado.pipeline, estado.evidencia, estado.id_activo = pipeline, evidencia, activacion.id
+    return describir_servido(estado)
+
+
+@app.post("/modelo/restaurar")
+def restaurar(request: Request) -> ModeloServido:
+    """Vuelve al modelo de referencia exportado y evaluado por el cuaderno."""
+    pipeline, evidencia = cargar_pipeline(RESULTADOS)
+    MODELO_ACTIVO.unlink(missing_ok=True)
+    estado = request.app.state
+    estado.pipeline, estado.evidencia, estado.id_activo = pipeline, evidencia, None
+    return describir_servido(estado)
