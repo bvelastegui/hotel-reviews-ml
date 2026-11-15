@@ -3,6 +3,7 @@
 import csv
 import io
 import os
+import re
 import unicodedata
 from hashlib import sha256
 from itertools import batched
@@ -143,6 +144,37 @@ def miles(numero):
     return f"{numero:,}".replace(",", ".")
 
 
+PALABRA = re.compile(r"[^\W\d_]{2,}")
+MINIMO_TEXTUAL = 0.6  # proporción de filas con aspecto de reseña para aceptar una columna
+
+
+def parece_resena(texto):
+    """Una reseña tiene al menos tres palabras; fechas, códigos o categorías no."""
+    return len(PALABRA.findall(texto)) >= 3
+
+
+def aptitud_columna(filas, posicion):
+    """Proporción de filas no vacías de la columna que tienen aspecto de reseña."""
+    valores = [fila[posicion].strip() for fila in filas if fila[posicion].strip()]
+    return sum(parece_resena(valor) for valor in valores) / len(valores) if valores else 0.0
+
+
+def columna_sugerida(columnas, filas):
+    nombres_comunes = {"texto", "reseña", "resena", "review_text", "comentario", "comentarios", "opinion", "opinión"}
+    for posicion, nombre in enumerate(columnas):
+        if nombre.casefold() in nombres_comunes and aptitud_columna(filas, posicion) >= MINIMO_TEXTUAL:
+            return posicion
+    def puntuacion(posicion):
+        largo = sum(len(fila[posicion]) for fila in filas) / len(filas)
+        return aptitud_columna(filas, posicion), largo
+    return max(range(len(columnas)), key=puntuacion)
+
+
+def recortar(texto, limite=40):
+    texto = " ".join(texto.split())
+    return texto if len(texto) <= limite else texto[: limite - 1] + "…"
+
+
 def cantidad(numero, singular, plural):
     return f"{miles(numero)} {singular if numero == 1 else plural}"
 
@@ -240,13 +272,27 @@ def cargar_archivo():
         st.error(str(error))
         return
 
-    nombres_comunes = {"texto", "reseña", "resena", "review_text", "comentario"}
-    sugerida = next((i for i, nombre in enumerate(columnas) if nombre.casefold() in nombres_comunes), 0)
+    sugerida = columna_sugerida(columnas, filas)
     huella = sha256(datos).hexdigest()
     columna = st.selectbox("Columna con el texto de las reseñas", columnas, index=sugerida, key=f"columna_{huella}")
     indice = columnas.index(columna)
     clave = (huella, columna)
-    if st.button("Analizar archivo", type="primary", icon=":material/arrow_forward:", key=f"analizar_csv_{huella}"):
+    ejemplo = next((fila[indice].strip() for fila in filas if fila[indice].strip()), "")
+    aptitud = aptitud_columna(filas, indice)
+    valida = aptitud >= MINIMO_TEXTUAL
+    if valida:
+        st.caption(f"Ejemplo de esta columna: «{recortar(ejemplo, 90)}»")
+    else:
+        muestras = list(dict.fromkeys(fila[indice].strip() for fila in filas if fila[indice].strip()))[:2]
+        detalle = (" Contiene valores como " + " y ".join(f"«{recortar(m)}»" for m in muestras) + ".") if muestras else \
+            " Está vacía."
+        mejor = columna_sugerida(columnas, filas)
+        consejo = (f" Prueba con «{columnas[mejor]}»." if mejor != indice and aptitud_columna(filas, mejor) >= MINIMO_TEXTUAL
+                   else " Revisa que el archivo tenga una columna con los comentarios de los huéspedes.")
+        st.warning(f"Solo el {round(100 * aptitud)} % de sus filas tiene texto con varias palabras.{detalle}{consejo}",
+                   title=f"La columna «{columna}» no parece contener reseñas", icon=":material/text_fields:")
+    if st.button("Analizar archivo", type="primary", icon=":material/arrow_forward:", key=f"analizar_csv_{huella}",
+                 disabled=not valida):
         st.session_state.pop("resultado_csv", None)
         st.session_state.pop("temas_csv", None)
         st.session_state.pop("filtro_csv", None)
