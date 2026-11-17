@@ -93,6 +93,6 @@ El [informe final en PDF](entregables/informe.pdf) documenta los datos, la metod
 
 ## Presentación y póster
 
-La [presentación](entregables/presentacion.pptx) incluye diapositivas principales y de respaldo, con notas del expositor. También se incluye una [copia PDF](entregables/presentacion.pdf).
+La [presentación](entregables/presentacion.pptx) tiene 18 diapositivas principales y 2 ocultas de respaldo. Empieza con la demostración en vivo de la aplicación y la exponen Bryan Velastegui, Evelyn Morocho y Erika Gudiño. También se incluye una [copia PDF](entregables/presentacion.pdf).
 
 El [póster en PDF](entregables/poster.pdf) tiene formato A3 horizontal (420 × 297 mm).
